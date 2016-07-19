@@ -16,10 +16,9 @@ import org.springframework.jdbc.core.PreparedStatementCallback;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Lists;
-import com.google.common.collect.MapMaker;
+import com.google.common.collect.MigrateMap;
 import com.taobao.yugong.common.YuGongConstants;
 import com.taobao.yugong.common.db.IncrementRecordMerger;
-import com.taobao.yugong.common.db.meta.ColumnMeta;
 import com.taobao.yugong.common.db.meta.ColumnValue;
 import com.taobao.yugong.common.model.YuGongContext;
 import com.taobao.yugong.common.model.record.IncrementOpType;
@@ -39,6 +38,7 @@ public class MultiThreadIncrementRecordApplier extends IncrementRecordApplier {
     private int                threadSize = 5;
     private int                splitSize  = 50;
     private ThreadPoolExecutor executor;
+    private String             executorName;
 
     public MultiThreadIncrementRecordApplier(YuGongContext context){
         super(context);
@@ -51,16 +51,28 @@ public class MultiThreadIncrementRecordApplier extends IncrementRecordApplier {
         this.splitSize = splitSize;
     }
 
+    public MultiThreadIncrementRecordApplier(YuGongContext context, int threadSize, int splitSize,
+                                             ThreadPoolExecutor executor){
+        super(context);
+
+        this.threadSize = threadSize;
+        this.splitSize = splitSize;
+        this.executor = executor;
+    }
+
     public void start() {
         super.start();
 
-        executor = new ThreadPoolExecutor(threadSize,
-            threadSize,
-            60,
-            TimeUnit.SECONDS,
-            new ArrayBlockingQueue(threadSize * 2),
-            new NamedThreadFactory(this.getClass().getSimpleName() + "-" + context.getTableMeta().getFullName()),
-            new ThreadPoolExecutor.CallerRunsPolicy());
+        executorName = this.getClass().getSimpleName() + "-" + context.getTableMeta().getFullName();
+        if (executor == null) {
+            executor = new ThreadPoolExecutor(threadSize,
+                threadSize,
+                60,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue(threadSize * 2),
+                new NamedThreadFactory(executorName),
+                new ThreadPoolExecutor.CallerRunsPolicy());
+        }
     }
 
     public void stop() {
@@ -103,10 +115,10 @@ public class MultiThreadIncrementRecordApplier extends IncrementRecordApplier {
      * 划分为table + I/U/D类型
      */
     protected Map<List<String>, Map<IncrementOpType, List<IncrementRecord>>> buildBucket(List records) {
-        Map<List<String>, Map<IncrementOpType, List<IncrementRecord>>> buckets = new MapMaker().makeComputingMap(new Function<List<String>, Map<IncrementOpType, List<IncrementRecord>>>() {
+        Map<List<String>, Map<IncrementOpType, List<IncrementRecord>>> buckets = MigrateMap.makeComputingMap(new Function<List<String>, Map<IncrementOpType, List<IncrementRecord>>>() {
 
             public Map<IncrementOpType, List<IncrementRecord>> apply(List<String> names) {
-                return new MapMaker().makeComputingMap(new Function<IncrementOpType, List<IncrementRecord>>() {
+                return MigrateMap.makeComputingMap(new Function<IncrementOpType, List<IncrementRecord>>() {
 
                     public List<IncrementRecord> apply(IncrementOpType opType) {
                         return Lists.newArrayList();
@@ -142,8 +154,14 @@ public class MultiThreadIncrementRecordApplier extends IncrementRecordApplier {
                     template.submit(new Runnable() {
 
                         public void run() {
-                            MDC.put(YuGongConstants.MDC_TABLE_SHIT_KEY, context.getTableMeta().getFullName());
-                            applyBatch0(subList, jdbcTemplate, opType);
+                            String name = Thread.currentThread().getName();
+                            try {
+                                MDC.put(YuGongConstants.MDC_TABLE_SHIT_KEY, context.getTableMeta().getFullName());
+                                Thread.currentThread().setName(executorName);
+                                applyBatch0(subList, jdbcTemplate, opType);
+                            } finally {
+                                Thread.currentThread().setName(name);
+                            }
                         }
                     });
                     index = end;// 移动到下一批次
@@ -189,19 +207,7 @@ public class MultiThreadIncrementRecordApplier extends IncrementRecordApplier {
                         }
 
                         // 添加主键
-                        List<ColumnValue> pks = Lists.newArrayList();
-                        // add by 文疏，物化视图创建由with primary改为with (shardKey)
-                        if (incRecord.getOpType() == IncrementOpType.U || incRecord.getOpType() == IncrementOpType.I) {
-                            for (ColumnMeta cm : context.getTableMeta().getPrimaryKeys()) {
-                                for (ColumnValue cv : incRecord.getPrimaryKeys()) {
-                                    if (cm.getName().equals(cv.getColumn().getName())) {
-                                        pks.add(cv);
-                                    }
-                                }
-                            }
-                        } else {
-                            pks = incRecord.getPrimaryKeys();
-                        }
+                        List<ColumnValue> pks = incRecord.getPrimaryKeys();
                         for (ColumnValue pk : pks) {
                             Integer index = getIndex(indexs, pk, true);// 考虑delete的目标库主键，可能在源库的column中
                             if (index != null) {
@@ -249,8 +255,14 @@ public class MultiThreadIncrementRecordApplier extends IncrementRecordApplier {
                     template.submit(new Runnable() {
 
                         public void run() {
-                            MDC.put(YuGongConstants.MDC_TABLE_SHIT_KEY, context.getTableMeta().getFullName());
-                            applyOneByOne(subList, jdbcTemplate);
+                            String name = Thread.currentThread().getName();
+                            try {
+                                MDC.put(YuGongConstants.MDC_TABLE_SHIT_KEY, context.getTableMeta().getFullName());
+                                Thread.currentThread().setName(executorName);
+                                applyOneByOne(subList, jdbcTemplate);
+                            } finally {
+                                Thread.currentThread().setName(name);
+                            }
                         }
                     });
                     index = end;// 移动到下一批次
@@ -264,5 +276,4 @@ public class MultiThreadIncrementRecordApplier extends IncrementRecordApplier {
             super.applyOneByOne(incRecords, jdbcTemplate);
         }
     }
-
 }

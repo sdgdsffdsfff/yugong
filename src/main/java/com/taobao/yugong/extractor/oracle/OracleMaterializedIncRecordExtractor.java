@@ -13,13 +13,14 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.lang.StringUtils;
 import org.slf4j.MDC;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementCallback;
 
 import com.google.common.collect.Lists;
-import com.google.common.collect.MapMaker;
+import com.google.common.collect.MigrateMap;
 import com.taobao.yugong.applier.AbstractRecordApplier.TableSqlUnit;
 import com.taobao.yugong.common.YuGongConstants;
 import com.taobao.yugong.common.db.meta.ColumnMeta;
@@ -47,7 +48,9 @@ import com.taobao.yugong.exception.YuGongException;
  */
 public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordExtractor {
 
-    private static final String             MLOG_EXTRACT_FORMAT    = "select rowid,{0} from {1}.{2} where rownum <= ?";
+    // private static final String MLOG_EXTRACT_FORMAT =
+    // "select rowid,{0} from {1}.{2} where rownum <= ?";
+    private static final String             MLOG_EXTRACT_FORMAT    = "select * from (select rowid,{0} from {1}.{2} order by sequence$$ asc) where rownum <= ?";
     // private static final String MASTER_FORMAT =
     // "select  /*+index(t {0})*/ {1} from {2}.{3} t where {4}=?";
     private static final String             MASTER_MULTI_PK_FORMAT = "select {0} from {1}.{2} t where {3}";
@@ -64,6 +67,7 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
     private int                             threadSize             = 5;
     private int                             splitSize              = 1;
     private ThreadPoolExecutor              executor;
+    private String                          executorName;
 
     public OracleMaterializedIncRecordExtractor(YuGongContext context){
         this.context = context;
@@ -72,12 +76,15 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
     public void start() {
         super.start();
 
-        masterSqlCache = new MapMaker().makeMap();
+        masterSqlCache = MigrateMap.makeMap();
         String schemaName = context.getTableMeta().getSchema();
         String tableName = context.getTableMeta().getName();
 
         // 后去mlog表名
         String mlogTableName = TableMetaGenerator.getMLogTableName(context.getSourceDs(), schemaName, tableName);
+        if (StringUtils.isEmpty(mlogTableName)) {
+            throw new YuGongException("not found mlog table for [" + schemaName + "." + tableName + "]");
+        }
         // 获取mlog表结构
         mlogMeta = TableMetaGenerator.getTableMeta(context.getSourceDs(),
             context.getTableMeta().getSchema(),
@@ -88,13 +95,16 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
         mlogExtractSql = new MessageFormat(MLOG_EXTRACT_FORMAT).format(new Object[] { colstr, schemaName, mlogTableName });
         mlogCleanSql = new MessageFormat(MLOG_CLEAN_FORMAT).format(new Object[] { schemaName, mlogTableName });
 
-        executor = new ThreadPoolExecutor(threadSize,
-            threadSize,
-            60,
-            TimeUnit.SECONDS,
-            new ArrayBlockingQueue<Runnable>(threadSize * 2),
-            new NamedThreadFactory(this.getClass().getSimpleName() + "-" + context.getTableMeta().getFullName()),
-            new ThreadPoolExecutor.CallerRunsPolicy());
+        executorName = this.getClass().getSimpleName() + "-" + context.getTableMeta().getFullName();
+        if (executor == null) {
+            executor = new ThreadPoolExecutor(threadSize,
+                threadSize,
+                60,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue<Runnable>(threadSize * 2),
+                new NamedThreadFactory(executorName),
+                new ThreadPoolExecutor.CallerRunsPolicy());
+        }
 
         tracer.update(context.getTableMeta().getFullName(), ProgressStatus.INCING);
     }
@@ -169,6 +179,8 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
                     for (ColumnMeta column : context.getTableMeta().getColumns()) {
                         if (pkListHave(mlogMeta.getColumns(), column.getName())) {
                             ColumnValue col = getColumnValue(rs, context.getSourceEncoding(), column);
+                            // 针对非主键的列,比如拆分字段,一起当做数据主键
+                            // 扩展列可能会发生变化,反查时不能带这个字段
                             primaryKeys.add(col);
                         }
                     }
@@ -180,10 +192,10 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
                         columns);
                     record.setRowId(rowId);
                     record.setOpType(opType);
-
                     result.add(record);
                 }
 
+                rs.close();
                 return result;
             }
         });
@@ -202,8 +214,14 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
                     template.submit(new Runnable() {
 
                         public void run() {
-                            MDC.put(YuGongConstants.MDC_TABLE_SHIT_KEY, context.getTableMeta().getFullName());
-                            buildMasterRecordOneByOne(jdbcTemplate, subList);
+                            String name = Thread.currentThread().getName();
+                            try {
+                                MDC.put(YuGongConstants.MDC_TABLE_SHIT_KEY, context.getTableMeta().getFullName());
+                                Thread.currentThread().setName(executorName);
+                                buildMasterRecordOneByOne(jdbcTemplate, subList);
+                            } finally {
+                                Thread.currentThread().setName(name);
+                            }
                         }
                     });
                     index = end;// 移动到下一批次
@@ -235,42 +253,23 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
             public Object doInPreparedStatement(PreparedStatement ps) throws SQLException, DataAccessException {
                 for (OracleIncrementRecord record : records) {
                     int i = 1;
-                    // add by 文疏，物化视图创建语句由with primary key 改为with (shardkey)，
-                    // 对于update的日志，可能会加载出shardkey列，但是此时shardkey已经改变就无法去数据库反查到了
-                    for (ColumnMeta col : context.getTableMeta().getPrimaryKeys()) {
-                        for (ColumnValue pk : record.getPrimaryKeys()) {
-                            if (col.getName().equals(pk.getColumn().getName())) {
-                                ps.setObject(i, pk.getValue(), pk.getColumn().getType());
-                                i++;
-                            }
-                        }
+                    for (ColumnValue pk : record.getPrimaryKeys()) {
+                        ps.setObject(i, pk.getValue(), pk.getColumn().getType());
+                        i++;
                     }
-                    /*
-                     * else { for (ColumnValue pk : record.getPrimaryKeys()) {
-                     * ps.setObject(i, pk.getValue(), pk.getColumn().getType());
-                     * i++; } }
-                     */
 
                     try {
                         ResultSet rs = ps.executeQuery();
                         // 一条日志对应一条主表记录
                         List<ColumnValue> columns = new ArrayList<ColumnValue>();
-                        // List<ColumnValue> primaryKeys = new
-                        // ArrayList<ColumnValue>();
                         boolean exist = false;
                         if (rs.next()) {
                             exist = true;
+                            // 反查获取到完整行记录
                             for (ColumnMeta col : context.getTableMeta().getColumns()) {
                                 ColumnValue cv = getColumnValue(rs, context.getSourceEncoding(), col);
                                 columns.add(cv);
                             }
-
-                            // for (ColumnMeta col :
-                            // context.getTableMeta().getPrimaryKeys()) {
-                            // ColumnValue cv = getOracleColumnValue(rs,
-                            // context.getSourceEncoding(), col);
-                            // primaryKeys.add(cv);
-                            // }
                         }
 
                         if (!columns.isEmpty()) {
@@ -310,16 +309,9 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
                     // 构造master sql
                     String colstr = SqlTemplates.COMMON.makeColumn(context.getTableMeta().getColumnsWithPrimary());
                     List<ColumnMeta> primaryMetas = Lists.newArrayList();
-                    // add by 文疏，物化视图创建语句由with primary key 改为with (shardkey)，
-                    // 对于update的日志，可能会加载出shardkey列，但是此时shardkey已经改变就无法去数据库反查到了
-
-                    for (ColumnMeta columnMeta : context.getTableMeta().getPrimaryKeys()) {
-                        primaryMetas.add(columnMeta);
+                    for (ColumnValue col : record.getPrimaryKeys()) {
+                        primaryMetas.add(col.getColumn());
                     }
-                    /*
-                     * else { for (ColumnValue col : record.getPrimaryKeys()) {
-                     * primaryMetas.add(col.getColumn()); } }
-                     */
                     String priStr = SqlTemplates.COMMON.makeWhere(primaryMetas);
                     applierSql = new MessageFormat(MASTER_MULTI_PK_FORMAT).format(new Object[] { colstr,
                             record.getSchemaName(), record.getTableName(), priStr });
@@ -335,7 +327,7 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
 
     private boolean pkListHave(List<ColumnMeta> pks, String mayBePk) {
         for (ColumnMeta pk : pks) {
-            if (pk.getName().equals(mayBePk)) {
+            if (pk.getName().equalsIgnoreCase(mayBePk)) {
                 return true;
             }
         }
@@ -345,7 +337,13 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
 
     private IncrementOpType getDmlType(ResultSet rs) throws SQLException {
         String dmlType = rs.getString("DMLTYPE$$");
-        return IncrementOpType.valueOf(dmlType);
+        // 针对主键或者拆分条件的变更,会表现为OLD_NEW=O + N,但是拆分条件的变更DMLTYPE=U,需要强制修改为D操作
+        String oldNew = rs.getString("OLD_NEW$$");
+        if (oldNew.equalsIgnoreCase("O")) {
+            return IncrementOpType.D;
+        } else {
+            return IncrementOpType.valueOf(dmlType);
+        }
     }
 
     public void setSleepTime(long sleepTime) {
@@ -362,6 +360,10 @@ public class OracleMaterializedIncRecordExtractor extends AbstractOracleRecordEx
 
     public void setConcurrent(boolean concurrent) {
         this.concurrent = concurrent;
+    }
+
+    public void setExecutor(ThreadPoolExecutor executor) {
+        this.executor = executor;
     }
 
 }

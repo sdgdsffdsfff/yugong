@@ -1,5 +1,9 @@
 package com.taobao.yugong.common.utils;
 
+import com.taobao.yugong.common.db.meta.ColumnMeta;
+import com.taobao.yugong.common.model.DbType;
+import com.taobao.yugong.exception.YuGongException;
+
 import java.io.UnsupportedEncodingException;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -14,10 +18,6 @@ import org.apache.commons.lang.StringUtils;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
-
-import com.taobao.yugong.common.db.meta.ColumnMeta;
-import com.taobao.yugong.common.model.DbType;
-import com.taobao.yugong.exception.YuGongException;
 
 public class YuGongUtils {
 
@@ -62,11 +62,16 @@ public class YuGongUtils {
             public Object doInConnection(Connection c) throws SQLException, DataAccessException {
                 DatabaseMetaData meta = c.getMetaData();
                 String databaseName = meta.getDatabaseProductName();
+                String version = meta.getDatabaseProductVersion();
 
                 if (StringUtils.startsWithIgnoreCase(databaseName, "oracle")) {
                     return DbType.ORACLE;
                 } else if (StringUtils.startsWithIgnoreCase(databaseName, "mysql")) {
-                    return DbType.MYSQL;
+                    if (StringUtils.contains(version, "-TDDL-")) {
+                        return DbType.DRDS;
+                    } else {
+                        return DbType.MYSQL;
+                    }
                 } else {
                     throw new YuGongException("unknow database type " + databaseName);
                 }
@@ -90,7 +95,7 @@ public class YuGongUtils {
             result.append(Character.toUpperCase(name.charAt(0)));
             for (int i = 1; i < name.length(); i++) {
                 String s = String.valueOf(name.charAt(i));
-                if (s.equals("_")) {
+                if ("_".equals(s) || "-".equals(s)) {
                     needUpper = true;
                 } else {
                     if (needUpper) {
