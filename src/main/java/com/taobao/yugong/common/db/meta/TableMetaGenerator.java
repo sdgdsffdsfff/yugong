@@ -28,7 +28,7 @@ import com.taobao.yugong.exception.YuGongException;
 
 /**
  * 基于mysql的table meta获取
- * 
+ *
  * @author agapple 2013-9-9 下午2:45:30
  * @since 3.0.0
  */
@@ -40,11 +40,6 @@ public class TableMetaGenerator {
 
     /**
      * 获取对应的table meta信息，精确匹配
-     * 
-     * @param dataSource
-     * @param schemaName
-     * @param tableName
-     * @return
      */
     public static Table getTableMeta(final DataSource dataSource, final String schemaName, final String tableName) {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
@@ -159,9 +154,6 @@ public class TableMetaGenerator {
 
     /**
      * 查询所有的表，不返回表中的字段
-     * 
-     * @param dataSource
-     * @return
      */
     public static List<Table> getTableMetasWithoutColumn(final DataSource dataSource, final String schemaName,
                                                          final String tableName) {
@@ -185,7 +177,8 @@ public class TableMetaGenerator {
                     while (rs.next()) {
                         String schema = rs.getString(1);
                         String name = rs.getString(2);
-                        if (!StringUtils.startsWithIgnoreCase(name, "MLOG$_")) {
+                        if (!StringUtils.startsWithIgnoreCase(name, "MLOG$_")
+                            && !StringUtils.startsWithIgnoreCase(name, "RUPD$_")) {
                             table = new Table("TABLE", schema, name);
                             result.add(table);
                         }
@@ -202,7 +195,8 @@ public class TableMetaGenerator {
                         String name = rs.getString(3);
                         String type = rs.getString(4);
 
-                        if (!StringUtils.startsWithIgnoreCase(name, "MLOG$_")) {
+                        if (!StringUtils.startsWithIgnoreCase(name, "MLOG$_")
+                            && !StringUtils.startsWithIgnoreCase(name, "RUPD$_")) {
                             table = new Table(type, StringUtils.isEmpty(catlog) ? schema : catlog, name);
                             result.add(table);
                         }
@@ -239,7 +233,7 @@ public class TableMetaGenerator {
                         indexes.put(columnName, indexName);
                     }
                 }
-                
+
                 rs.close();
                 return indexes;
             }
@@ -249,15 +243,10 @@ public class TableMetaGenerator {
     /**
      * <pre>
      * 常见的物化视图创建语句：
-     * 1. CREATE MATERIALIZED VIEW LOG ON test_all_target with primary key; 
+     * 1. CREATE MATERIALIZED VIEW LOG ON test_all_target with primary key;
      * 
      * 本方法，主要提取生成物化视图的表名
      * </pre>
-     * 
-     * @param dataSource
-     * @param schemaName
-     * @param tableName
-     * @return
      */
     public static String getMLogTableName(final DataSource dataSource, final String schemaName, final String tableName) {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
@@ -277,7 +266,7 @@ public class TableMetaGenerator {
                 if (rs.next()) {
                     log = rs.getString("log_table");
                 }
-                
+
                 rs.close();
                 return log;
             }
@@ -348,11 +337,6 @@ public class TableMetaGenerator {
 
     /**
      * 获取DRDS下表的拆分字段, 返回格式为 id,name
-     * 
-     * @param dataSource
-     * @param schemaName
-     * @param tableName
-     * @return
      */
     public static String getShardKeyByDRDS(final DataSource dataSource, final String schemaName, final String tableName) {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
@@ -370,7 +354,7 @@ public class TableMetaGenerator {
                     if (rs.next()) {
                         log = rs.getString("KEYS");
                     }
-                    
+
                     rs.close();
                     return log;
                 }
@@ -391,16 +375,11 @@ public class TableMetaGenerator {
 
     /**
      * 根据{@linkplain DatabaseMetaData}获取正确的表名
-     * 
+     *
      * <pre>
      * metaData中的storesUpperCaseIdentifiers，storesUpperCaseQuotedIdentifiers，storesLowerCaseIdentifiers,
      * storesLowerCaseQuotedIdentifiers,storesMixedCaseIdentifiers,storesMixedCaseQuotedIdentifiers
      * </pre>
-     * 
-     * @param name
-     * @param metaData
-     * @return
-     * @throws SQLException
      */
     private static String getIdentifierName(String name, DatabaseMetaData metaData) throws SQLException {
         if (metaData.storesMixedCaseIdentifiers()) {

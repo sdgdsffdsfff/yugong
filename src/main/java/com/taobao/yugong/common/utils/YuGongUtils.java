@@ -1,9 +1,5 @@
 package com.taobao.yugong.common.utils;
 
-import com.taobao.yugong.common.db.meta.ColumnMeta;
-import com.taobao.yugong.common.model.DbType;
-import com.taobao.yugong.exception.YuGongException;
-
 import java.io.UnsupportedEncodingException;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -19,6 +15,10 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import com.taobao.yugong.common.db.meta.ColumnMeta;
+import com.taobao.yugong.common.model.DbType;
+import com.taobao.yugong.exception.YuGongException;
+
 public class YuGongUtils {
 
     public static boolean isEmpty(Collection collection) {
@@ -31,9 +31,6 @@ public class YuGongUtils {
 
     /**
      * 返回字段名字的数组
-     * 
-     * @param columns
-     * @return
      */
     public static String[] getColumnNameArray(List<ColumnMeta> columns) {
         if (columns == null || columns.size() == 0) {
@@ -51,9 +48,6 @@ public class YuGongUtils {
 
     /**
      * 根据DataSource判断一下数据库类型
-     * 
-     * @param dataSource
-     * @return
      */
     public static DbType judgeDbType(DataSource dataSource) {
         final JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
@@ -84,7 +78,7 @@ public class YuGongUtils {
      * Convert a column name with underscores to the corresponding class name
      * using "camel case". A name like "customer_number" would match a
      * "CustomerNumber" class name.
-     * 
+     *
      * @param name the column name to be converted
      * @return the name using "camel case"
      */

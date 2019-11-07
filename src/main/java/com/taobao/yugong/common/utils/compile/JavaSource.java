@@ -20,6 +20,7 @@ import com.google.common.collect.MigrateMap;
 public class JavaSource {
 
     private static Map<String, Pattern> patterns = null;
+
     static {
         patterns = MigrateMap.makeComputingMap(new Function<String, Pattern>() {
 
